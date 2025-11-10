@@ -51,7 +51,7 @@ def estimar_oro(peso_gramos: float, pureza: int):
 
 # ================== ESTIMADOR DE ACTIVOS DIGITALES ==================
 def estimar_activo_digital(url: str):
-    """Consulta valor estimado de una web o dominio vía worthofweb.com"""
+    """Consulta valor estimado de una web o dominio vía siteprice.org"""
     headers = {"User-Agent": "Mozilla/5.0"}
     site = url.replace("https://", "").replace("http://", "").split("/")[0]
     check_url = f"https://www.siteprice.org/website-worth/{site}"
@@ -159,9 +159,6 @@ if tipo_activo == "💻 Electrónica":
         precio_original = st.number_input("Precio original (USD)", 10.0, step=10.0)
         antiguedad = st.slider("Antigüedad (años)", 0, 10, 4)
         condicion = st.slider("Condición (1 = mala, 10 = excelente)", 1, 10, 7)
-        usar_ia_premium = st.checkbox("Activar IA premium ($0.99)", value=False)
-
-        st.subheader("🌐 Fuentes de Datos")
         usar_ebay = st.checkbox("eBay", value=True)
         usar_google = st.checkbox("Google Shopping", value=False)
         usar_encuentra = st.checkbox("Encuentra24 RSS", value=False)
@@ -215,7 +212,6 @@ if st.button("🚀 Calcular Estimación de Empeño", use_container_width=True):
 
         df = pd.DataFrame(resultados)
         st.dataframe(df, use_container_width=True, hide_index=True)
-
         stats = calcular_valor_empeno(precios, antiguedad, condicion)
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("💰 Mediana", f"${stats['mediana']:.2f}")
@@ -248,5 +244,59 @@ if st.button("🚀 Calcular Estimación de Empeño", use_container_width=True):
             st.metric("💻 Valor estimado del sitio", f"${bruto:,.2f}")
             st.metric("💵 Valor de empeño sugerido", f"${empeno:,.2f}")
             st.caption("Fuente: siteprice.org / estimación de valor web aproximado.")
+
+            # ================== ESCROW ==================
+            st.markdown("---")
+            st.subheader("💼 Simulador de Custodia (Escrow)")
+            monto_escrow = st.number_input("Monto a custodiar (USD)", min_value=10.0, step=10.0, value=empeno)
+            dias_escrow = st.slider("Días de retención", min_value=1, max_value=30, value=7)
+
+            def simular_escrow(monto, dias, comision_pct=3.5):
+                comision = monto * comision_pct / 100
+                neto = monto - comision
+                return {"monto": monto, "comision": comision, "neto": neto, "dias": dias}
+
+            if st.button("🧾 Calcular Custodia Simulada"):
+                datos = simular_escrow(monto_escrow, dias_escrow)
+                st.success(f"""
+                💰 **Monto en custodia:** ${datos['monto']:.2f}  
+                💸 **Comisión (3.5%)**: ${datos['comision']:.2f}  
+                🏦 **Monto liberado:** ${datos['neto']:.2f}  
+                ⏳ **Retención:** {datos['dias']} días
+                """)
+                df = pd.DataFrame({
+                    "Concepto": ["Comisión", "Monto liberado"],
+                    "Valor": [datos['comision'], datos['neto']]
+                })
+                chart = alt.Chart(df).mark_arc(innerRadius=50).encode(
+                    theta="Valor", color="Concepto", tooltip=["Concepto", "Valor"]
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+            # ================== PAYPAL -> ACH ==================
+            st.markdown("---")
+            st.subheader("💳 Simulador PayPal → ACH")
+            monto_paypal = st.number_input("Monto a convertir desde PayPal (USD)", min_value=10.0, step=10.0, value=empeno)
+            def simular_paypal_to_ach(monto, comision_pct=8.0):
+                comision = monto * comision_pct / 100
+                neto = monto - comision
+                return {"deposito": monto, "comision": comision, "neto": neto}
+
+            if st.button("🏦 Simular Retiro ACH"):
+                datos = simular_paypal_to_ach(monto_paypal)
+                st.success(f"""
+                📥 **Depósito PayPal:** ${datos['deposito']:.2f}  
+                💸 **Comisión (8%)**: ${datos['comision']:.2f}  
+                🏦 **Transferencia ACH neta:** ${datos['neto']:.2f}  
+                ⏱️ **Tiempo estimado:** 24 horas
+                """)
+                df = pd.DataFrame({
+                    "Concepto": ["Comisión", "Transferencia neta"],
+                    "Valor": [datos['comision'], datos['neto']]
+                })
+                chart = alt.Chart(df).mark_arc(innerRadius=50).encode(
+                    theta="Valor", color="Concepto", tooltip=["Concepto", "Valor"]
+                )
+                st.altair_chart(chart, use_container_width=True)
         else:
             st.error("No se pudo obtener un valor estimado para este dominio.")
