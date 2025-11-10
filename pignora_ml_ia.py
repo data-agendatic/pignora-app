@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 import pandas as pd
 import altair as alt # Para visualizaciones
+import re # Para expresiones regulares en scraping
 
 # ================== CONFIGURACIÓN INICIAL ==================
 load_dotenv()
@@ -37,6 +38,8 @@ TASAS_CAMBIO_A_USD = {
     "USD": 1.0,
     "CLP": 0.0010, # Chile (ej. 1000 CLP por 1 USD)
     "PEN": 0.27,   # Perú (ej. 3.7 PEN por 1 USD)
+    "UYU": 0.025,  # Uruguay (ej. 40 UYU por 1 USD)
+    "BRL": 0.20,   # Brasil (ej. 5 BRL por 1 USD)
 }
 
 def convertir_a_usd(precio: float, moneda_origen: str) -> float:
@@ -45,8 +48,8 @@ def convertir_a_usd(precio: float, moneda_origen: str) -> float:
     tasa = TASAS_CAMBIO_A_USD.get(moneda_origen)
     if tasa:
         return precio * tasa
-    st.warning(f"⚠️ Moneda '{moneda_origen}' no reconocida en la demo para conversión. Asumiendo que el precio ya está en USD.")
-    return precio
+    # st.warning(f"⚠️ Moneda '{moneda_origen}' no reconocida en la demo para conversión. Asumiendo que el precio ya está en USD.")
+    return precio # Retorna el precio original si la moneda no está en la tabla
 
 def construir_query(categoria: str, modelo: str) -> str:
     """Construye la cadena de búsqueda para Mercado Libre."""
@@ -65,7 +68,9 @@ def buscar_mercado_libre_api(query: str):
         "MCO": "Colombia",  # COP
         "MLA": "Argentina", # ARS
         "MLC": "Chile",   # CLP
-        "MPE": "Perú"     # PEN
+        "MPE": "Perú",     # PEN
+        "MLU": "Uruguay",  # UYU
+        "MLB": "Brasil"    # BRL
     }
     todos_precios_usd = []
     todos_resultados_crudos = []
@@ -75,7 +80,7 @@ def buscar_mercado_libre_api(query: str):
         url = f"https://api.mercadolibre.com/sites/{site_id}/search"
         params = {"q": query, "condition": "used", "limit": 20} # Menos items para demo rápida
         try:
-            resp = requests.get(url, params=params, timeout=5) # Menos timeout para demo
+            resp = requests.get(url, params=params, timeout=7) # Aumentar un poco el timeout
             resp.raise_for_status() # Lanza un error para códigos de estado HTTP erróneos
             data = resp.json()
             resultados = data.get("results", [])
@@ -84,26 +89,30 @@ def buscar_mercado_libre_api(query: str):
             for r in resultados:
                 if "price" in r and "currency_id" in r:
                     precio_usd = convertir_a_usd(r["price"], r["currency_id"])
-                    precios_site.append(precio_usd)
+                    if precio_usd > 0: # Solo considerar precios válidos
+                        precios_site.append(precio_usd)
             
             if precios_site:
                 todos_precios_usd.extend(precios_site)
                 # Almacenar un subconjunto para no sobrecargar la UI
-                todos_resultados_crudos.extend([
-                    {"title": item.get("title", "")[:60] + "...",
-                     "price_original": item.get("price", 0.0),
-                     "currency_id": item.get("currency_id", ""),
-                     "price_usd": convertir_a_usd(item.get("price", 0.0), item.get("currency_id", "")),
-                     "permalink": item.get("permalink", ""),
-                     "site": site_id}
-                    for item in resultados[:5] # Limitar a 5 resultados por site para la tabla
-                ])
+                for item in resultados[:5]: # Limitar a 5 resultados por site para la tabla
+                     if "price" in item and "currency_id" in item:
+                        todos_resultados_crudos.append({
+                            "Título": item.get("title", "")[:60] + "...",
+                            "Precio Original": f"{item.get('price', 0.0):,.2f} {item.get('currency_id', '')}",
+                            "Precio USD": convertir_a_usd(item.get("price", 0.0), item.get("currency_id", "")),
+                            "Link": item.get("permalink", ""),
+                            "Sitio": site_id
+                        })
                 sitio_usado = site_id # Solo para indicar de dónde se obtuvieron los primeros datos
                 # Para la demo, podemos parar aquí si encontramos algo
                 break 
 
+        except requests.exceptions.Timeout:
+            # st.info(f"Tiempo de espera agotado para la API de ML en {pais_nombre}.")
+            pass
         except requests.exceptions.RequestException as e:
-            # st.info(f"No se obtuvieron resultados de la API para {pais_nombre}: {e}")
+            # st.info(f"Error en la API de ML para {pais_nombre}: {e}")
             pass # Silenciar errores de conexión para otros sitios en la demo
         except Exception as e:
             st.error(f"Error inesperado al buscar en {pais_nombre} (API): {e}")
@@ -117,7 +126,9 @@ def buscar_mercado_libre_scraping(query: str):
     Devuelve precios ya convertidos a USD.
     """
     slug = query.replace(" ", "-")
-    url = f"https://listado.mercadolibre.com.mx/{slug}"
+    # Intentar con un dominio más genérico o específico si sabes dónde quieres buscar primero
+    url = f"https://listado.mercadolibre.com.mx/{slug}" 
+    
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -125,33 +136,63 @@ def buscar_mercado_libre_scraping(query: str):
         ),
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
         "Referer": "https://www.mercadolibre.com.mx/",
+        "DNT": "1", # Do Not Track
+        "Connection": "keep-alive"
     }
 
     precios_usd = []
     try:
-        resp = requests.get(url, headers=headers, timeout=5) # Menos timeout para demo
+        resp = requests.get(url, headers=headers, timeout=10) # Aumentar timeout para scraping
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         
-        # Intentar diferentes selectores para precios, ya que pueden variar
-        price_spans = soup.select("span.andes-money-amount__fraction") # Selector principal
-        if not price_spans: # Si no encuentra el principal, probar otro común
-            price_spans = soup.select(".ui-search-price__part.ui-search-price__part--medium .andes-money-amount__fraction")
+        # --- SELECTORES MÁS ROBUSTOS / ALTERNATIVOS ---
+        # 1. Selector principal (el que usabas)
+        price_tags = soup.select("span.andes-money-amount__fraction") 
+        
+        # 2. Selector alternativo para listados más recientes o diferentes layouts
+        if not price_tags:
+            price_tags = soup.select("div.ui-search-price__second-line span.andes-money-amount__fraction")
+        
+        # 3. Otro selector posible que a veces aparece
+        if not price_tags:
+            price_tags = soup.select("span.andes-money-amount__parts:first-child .andes-money-amount__fraction")
 
-        for span in price_spans:
+        # 4. Fallback: Buscar cualquier texto que parezca un precio dentro de elementos de listado
+        if not price_tags:
+            # Esto es más un comodín y puede ser menos preciso
+            items = soup.select(".ui-search-layout__item")
+            for item in items:
+                price_text = item.find(text=re.compile(r'\$\s*\d[\d\.,]*'))
+                if price_text:
+                    clean_price = price_text.replace('$', '').replace('.', '').replace(',', '').strip()
+                    try:
+                        val_mxn = float(clean_price)
+                        if 50 < val_mxn < 500000:
+                            precios_usd.append(convertir_a_usd(val_mxn, "MXN"))
+                    except ValueError:
+                        continue
+            if precios_usd: # Si encontró algo con el fallback, salir
+                return precios_usd
+
+        if not price_tags:
+            st.info("Scraping: No se encontraron elementos de precio con ninguno de los selectores definidos.")
+            return [] # Retornar vacío si no se encontró nada
+
+        for span in price_tags:
             txt = span.get_text(strip=True).replace(".", "").replace(",", "")
             try:
                 val_mxn = float(txt)
-                # Filtrar valores extremos que podrían ser errores de scraping
-                if 50 < val_mxn < 500000: # Rango más amplio para MXN
+                if 50 < val_mxn < 5000000: # Rango más amplio para MXN
                     precios_usd.append(convertir_a_usd(val_mxn, "MXN"))
             except ValueError:
                 continue
+    except requests.exceptions.Timeout:
+        st.warning("⚠️ Scraping: Tiempo de espera agotado al intentar acceder a Mercado Libre.")
     except requests.exceptions.RequestException as e:
-        # st.info(f"No se pudo realizar scraping en ML México: {e}")
-        pass # Silenciar errores de conexión/scraping para la demo
+        st.warning(f"⚠️ Scraping: Error de red o HTTP al intentar acceder a Mercado Libre: {e}")
     except Exception as e:
-        st.error(f"Error inesperado durante el scraping: {e}")
+        st.error(f"⚠️ Scraping: Error inesperado durante el proceso: {e}")
 
     return precios_usd
 
@@ -175,7 +216,8 @@ def calcular_valor_empeno(precios_usd: list, antiguedad: int, condicion: int):
     factor_antiguedad = max(0.30, 1 - 0.10 * antiguedad) # Mínimo 30% del valor de mercado
 
     # Factor condición: De 0.4 (muy mala) a 1.0 (excelente).
-    factor_condicion = 0.4 + 0.06 * (condicion - 1) # (1-10) -> (0 a 9) * 0.06 = 0 a 0.54. Sumado a 0.4 da 0.4 a 0.94. Ajustar un poco
+    # Ajuste: (condicion-1) / 9 escala de 0 a 1. Luego se aplica un rango.
+    factor_condicion = 0.4 + (0.6 * (condicion - 1) / 9) # Rango de 0.4 (condición 1) a 1.0 (condición 10)
     factor_condicion = round(min(1.0, factor_condicion), 2) # Asegurarse que no exceda 1.0 y redondear
 
     # Factor de riesgo y ganancia de la casa de empeño (prestamos un % del valor de mercado ajustado)
@@ -263,7 +305,7 @@ with st.sidebar:
             "Televisor", "Herramienta eléctrica", "Joya / Reloj", "Otro",
         ],
     )
-    modelo = st.text_input("Modelo / Referencia (ej: 'Dell Vostro 3500', 'iPhone 11 128GB')", "iPhone 12 128GB")
+    modelo = st.text_input("Modelo / Referencia (ej: 'Dell Vostro 3500', 'iPhone 11 128GB')", "PlayStation 4")
     descripcion = st.text_area(
         "Descripción del artículo",
         "Buen estado general, uso moderado, incluye cargador y caja, pequeños rayones en pantalla.",
@@ -271,9 +313,9 @@ with st.sidebar:
 
     st.subheader("📊 Detalles de Valoración")
     precio_original = st.number_input(
-        "Precio original (nuevo, USD)", min_value=10.0, value=799.0, step=10.0, format="%.2f"
+        "Precio original (nuevo, USD)", min_value=10.0, value=500.0, step=10.0, format="%.2f"
     )
-    antiguedad = st.slider("Antigüedad (años)", 0, 10, 2)
+    antiguedad = st.slider("Antigüedad (años)", 0, 10, 4)
     condicion = st.slider("Condición (1 = muy mala, 10 = excelente)", 1, 10, 7)
 
     st.subheader("🌐 Fuentes de Datos")
@@ -312,14 +354,13 @@ if st.button("🚀 Calcular Estimación de Empeño", type="primary", use_contain
         with st.spinner("Buscando en Mercado Libre vía API..."):
             precios_api_usd, resultados_crudos_api, site_usado = buscar_mercado_libre_api(query)
             if precios_api_usd:
-                st.success(f"✔️ Encontrados {len(precios_api_usd)} precios en el sitio {site_usado} (vía API).")
+                st.success(f"✔️ Encontrados {len(precios_api_usd)} precios en el sitio {site_usado if site_usado else 'varios'} (vía API).")
                 if resultados_crudos_api:
                     df_api = pd.DataFrame(resultados_crudos_api)
-                    df_api = df_api[['title', 'price_original', 'currency_id', 'price_usd', 'site']]
                     st.dataframe(df_api, use_container_width=True, hide_index=True,
-                                 column_config={"permalink": st.column_config.LinkColumn("Link")})
+                                 column_config={"Link": st.column_config.LinkColumn("Link", display_text="Ver →")})
                     precios_totales_usd.extend(precios_api_usd)
-                    resultados_ml_df = pd.concat([resultados_ml_df, df_api])
+                    # resultados_ml_df = pd.concat([resultados_ml_df, df_api]) # No concatenar aquí para no duplicar en la tabla inferior
             else:
                 st.info("No se encontraron resultados relevantes vía API.")
 
@@ -330,18 +371,18 @@ if st.button("🚀 Calcular Estimación de Empeño", type="primary", use_contain
                 precios_scrap_usd = buscar_mercado_libre_scraping(query)
                 if precios_scrap_usd:
                     st.success(f"✔️ Encontrados {len(precios_scrap_usd)} precios en ML México (vía Web Scraping).")
-                    df_scrap = pd.DataFrame([{"Fuente": "ML Web MX", "Precio USD": p} for p in precios_scrap_usd])
+                    df_scrap = pd.DataFrame([{"Fuente": "ML Web MX", "Precio USD": f"{p:,.2f}"} for p in precios_scrap_usd[:10]]) # Mostrar top 10
                     st.dataframe(df_scrap, use_container_width=True, hide_index=True)
                     precios_totales_usd.extend(precios_scrap_usd)
                 else:
-                    st.info("No se encontraron precios relevantes vía Web Scraping.")
+                    st.info("No se encontraron precios relevantes vía Web Scraping. Esto puede ocurrir si el sitio ha cambiado su estructura.")
         else:
             st.info("Web Scraping desactivado.")
     
     st.markdown("---")
 
     if not precios_totales_usd:
-        st.error("❌ Lo sentimos, no se pudo obtener ningún precio de referencia. Intenta ajustar el modelo o la descripción.")
+        st.error("❌ Lo sentimos, no se pudo obtener ningún precio de referencia. Intenta ajustar el modelo o la descripción y/o verifica que las fuentes estén activas.")
         st.stop()
 
     # ================== CÁLCULO BASE DE VALOR ==================
@@ -378,12 +419,18 @@ if st.button("🚀 Calcular Estimación de Empeño", type="primary", use_contain
     # Visualización de la distribución de precios
     st.markdown("#### Distribución de Precios de Mercado Encontrados (USD)")
     df_precios = pd.DataFrame({'Precio (USD)': precios_filtrados})
+    
+    # Asegurarse de que el rango de precios para el histograma sea razonable
+    # Evitar que un solo valor muy atípico distorsione el histograma
+    min_chart_price = df_precios['Precio (USD)'].quantile(0.05) if not df_precios.empty else 0
+    max_chart_price = df_precios['Precio (USD)'].quantile(0.95) if not df_precios.empty else 1000
+    
     chart = alt.Chart(df_precios).mark_bar().encode(
-        alt.X('Precio (USD)', bin=True),
+        alt.X('Precio (USD)', bin=alt.Bin(maxbins=20), scale=alt.Scale(domain=[min_chart_price, max_chart_price])),
         alt.Y('count()', title='Frecuencia'),
         tooltip=['Precio (USD)', 'count()']
     ).properties(
-        title='Histograma de Precios Convertidos a USD'
+        title='Histograma de Precios Convertidos a USD (Rango principal)'
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -399,11 +446,13 @@ if st.button("🚀 Calcular Estimación de Empeño", type="primary", use_contain
             try:
                 parts = comentario_ia.split("VALOR_RECOMENDADO_FINAL:")
                 valor_str = parts[1].split('-')[0].strip().replace("$", "").replace(",", "")
-                valor_ia = float(valor_str)
-                justificacion = parts[1].split('-')[1].strip()
+                # Eliminar cualquier texto que no sea numérico al final de valor_str
+                valor_str_clean = re.sub(r'[^\d.]+', '', valor_str)
+                valor_ia = float(valor_str_clean)
+                justificacion = parts[1].split('-', 1)[1].strip() # Usar split con maxsplit=1 para el resto
                 st.success(f"**Recomendación IA Premium:** **${valor_ia:,.2f} USD** - *{justificacion}*")
-            except Exception:
-                st.warning(f"La IA respondió, pero no pude parsear el formato: {comentario_ia}")
+            except Exception as e:
+                st.warning(f"La IA respondió, pero no pude parsear el formato: {comentario_ia}. Error: {e}")
         else:
             st.warning(comentario_ia)
         st.caption("💳 Esta evaluación se considera una consulta premium (simulando un costo de $0.99).")
