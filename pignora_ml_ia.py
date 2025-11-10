@@ -35,18 +35,24 @@ usar_ia = st.checkbox("💡 Usar IA premium para comentario y ajuste (requiere s
 # ==== FUNCIONES ====
 
 def buscar_mercado_libre(query):
-    """Busca precios usados en Mercado Libre."""
-    SITE_ID = "MLM"  # México (puedes cambiar a MLPA si existe Panamá)
-    url = f"https://api.mercadolibre.com/sites/{SITE_ID}/search"
-    params = {"q": query, "condition": "used", "limit": 30}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        data = resp.json()
-        resultados = data.get("results", [])
-        precios = [r["price"] for r in resultados if "price" in r]
-        return precios
-    except Exception:
-        return []
+    """Busca precios usados en varios sitios de Mercado Libre."""
+    sites = ["MLM", "MCO", "MLA"]  # México, Colombia, Argentina
+    precios = []
+    for site in sites:
+        url = f"https://api.mercadolibre.com/sites/{site}/search"
+        params = {"q": query, "condition": "used", "limit": 30}
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            data = resp.json()
+            resultados = data.get("results", [])
+            precios_site = [r["price"] for r in resultados if "price" in r]
+            precios.extend(precios_site)
+            if precios_site:  # detenernos en el primero que devuelve datos
+                break
+        except Exception:
+            continue
+    return precios
+
 
 
 def buscar_google_shopping(query):
