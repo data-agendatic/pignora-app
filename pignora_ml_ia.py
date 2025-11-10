@@ -8,12 +8,22 @@ from openai import OpenAI
 import pandas as pd
 import altair as alt
 import re
-import time # Para pausas entre peticiones
+import time
 
 # ================== CONFIGURACIÓN INICIAL ==================
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# --- CLAVES API ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# CLAVE IMPORTANTE PARA MERCADO LIBRE:
+# Si tienes una, reemplaza 'YOUR_MERCADOLIBRE_APP_ID_HERE' con tu App ID real.
+# Puedes obtenerla en https://developers.mercadolibre.com.ar/es_ar/aplicaciones
+# Si no la tienes, el código intentará sin ella, pero el 403 es probable.
+ML_APP_ID = os.getenv("ML_APP_ID", "YOUR_MERCADOLIBRE_APP_ID_HERE") 
+# También puedes ponerla directamente aquí si no usas .env para ML_APP_ID:
+# ML_APP_ID = "1234567890123456" # Ejemplo: ¡Reemplaza con tu ID real!
+
+# Inicializar cliente de OpenAI solo si la API Key está presente
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 st.set_page_config(page_title="Pignora - Estimador de Empeño", page_icon="💰", layout="wide")
@@ -29,6 +39,8 @@ st.markdown("""
 
 # ================== FUNCIONES DE UTILIDAD ==================
 
+# Tasas de cambio simuladas (solo para la demo - en producción, usar una API real)
+# Estas tasas son para convertir a USD
 TASAS_CAMBIO_A_USD = {
     "MXN": 0.050,
     "COP": 0.00025,
@@ -38,24 +50,44 @@ TASAS_CAMBIO_A_USD = {
     "PEN": 0.27,
     "UYU": 0.025,
     "BRL": 0.20,
+    "VES": 0.000000028, # Venezuela, muy volátil
+    "BOB": 0.14, # Bolivia
+    "PYG": 0.00013, # Paraguay
+    "DOP": 0.017, # Rep. Dominicana
+    "GTQ": 0.13, # Guatemala
+    "HNL": 0.040, # Honduras
+    "NIO": 0.027, # Nicaragua
+    "PAB": 1.0, # Panamá
+    "CRC": 0.0019, # Costa Rica
+    "SVC": 0.11, # El Salvador
 }
 
 def convertir_a_usd(precio: float, moneda_origen: str) -> float:
+    """Convierte un precio de su moneda original a USD usando tasas simuladas."""
     moneda_origen = moneda_origen.upper()
     tasa = TASAS_CAMBIO_A_USD.get(moneda_origen)
     if tasa:
         return precio * tasa
-    return precio
+    return precio # Retorna el precio original si la moneda no está en la tabla (asumiendo que ya es USD)
 
 def construir_query(categoria: str, modelo: str) -> str:
+    """Construye la cadena de búsqueda para Mercado Libre."""
     base = categoria if categoria != "Otro" else ""
     texto = (base + " " + modelo).strip()
     return texto if texto else modelo
 
 def buscar_mercado_libre_api(query: str):
+    """
+    Busca precios en Mercado Libre usando la API oficial.
+    Intenta en varios países hasta encontrar resultados.
+    Devuelve precios ya convertidos a USD.
+    """
     sites = {
         "MLM": "México", "MCO": "Colombia", "MLA": "Argentina",
-        "MLC": "Chile", "MPE": "Perú", "MLU": "Uruguay", "MLB": "Brasil"
+        "MLC": "Chile", "MPE": "Perú", "MLU": "Uruguay", "MLB": "Brasil",
+        "MLV": "Venezuela", "MLB": "Bolivia", "MLP": "Paraguay", # Más sitios
+        "MLD": "Dominicana", "MLG": "Guatemala", "MLH": "Honduras",
+        "MLN": "Nicaragua", "MLP": "Panamá", "MLCR": "Costa Rica", "MLS": "El Salvador"
     }
     todos_precios_usd = []
     todos_resultados_crudos = []
@@ -64,15 +96,37 @@ def buscar_mercado_libre_api(query: str):
     st.subheader("🛠️ Diagnóstico API Mercado Libre:")
     st.write(f"Buscando con query: `{query}`")
 
+    # Headers para la petición API
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    }
+    
+    # Añadir el App-ID a los parámetros si está definido y no es el placeholder
+    base_params = {"q": query, "condition": "used", "limit": 20}
+    if ML_APP_ID and ML_APP_ID != "YOUR_MERCADOLIBRE_APP_ID_HERE":
+        base_params["app_id"] = ML_APP_ID
+    else:
+        st.warning("⚠️ No se ha configurado un `ML_APP_ID` real. Las peticiones a la API de Mercado Libre pueden ser rechazadas (Error 403).")
+        st.info("Para obtener un `ML_APP_ID`, crea una aplicación en tu cuenta de desarrollador de Mercado Libre: `https://developers.mercadolibre.com.ar/es_ar/aplicaciones`")
+
+
     for site_id, pais_nombre in sites.items():
         url = f"https://api.mercadolibre.com/sites/{site_id}/search"
-        params = {"q": query, "condition": "used", "limit": 20}
+        params = base_params.copy() # Usar una copia para cada sitio
+        
         st.write(f"Intentando API en {pais_nombre} ({site_id}). URL: `{url}?q={query}&condition=used&limit=20`")
         
         try:
-            resp = requests.get(url, params=params, timeout=10) # Aumentar timeout
+            resp = requests.get(url, params=params, headers=headers, timeout=10) # Pasar headers
             st.write(f"Status API {site_id}: {resp.status_code}")
-            resp.raise_for_status()
+            
+            # Si hay un error, mostrar el contenido de la respuesta para más detalles
+            if resp.status_code != 200:
+                st.write(f"Contenido de la respuesta de error de ML: `{resp.text[:500]}`") # Mostrar parte del error
+            
+            resp.raise_for_status() # Lanza una excepción si el status_code no es 2xx
             data = resp.json()
             resultados = data.get("results", [])
             st.write(f"Resultados API {site_id} encontrados: {len(resultados)}")
@@ -81,12 +135,12 @@ def buscar_mercado_libre_api(query: str):
             for r in resultados:
                 if "price" in r and "currency_id" in r:
                     precio_usd = convertir_a_usd(r["price"], r["currency_id"])
-                    if precio_usd > 0:
+                    if precio_usd is not None and precio_usd > 0: # Asegurarse que la conversión fue exitosa y > 0
                         precios_site.append(precio_usd)
             
             if precios_site:
                 todos_precios_usd.extend(precios_site)
-                for item in resultados[:5]:
+                for item in resultados[:5]: # Limitar a 5 para la tabla de la demo
                      if "price" in item and "currency_id" in item:
                         todos_resultados_crudos.append({
                             "Título": item.get("title", "")[:60] + "...",
@@ -96,32 +150,34 @@ def buscar_mercado_libre_api(query: str):
                             "Sitio": site_id
                         })
                 sitio_usado = site_id
-                # st.success(f"Éxito en API de {pais_nombre}.") # Descomentar para ver éxito inmediato
-                break # Para la demo, parar si encuentra resultados
+                # break # Para la demo, puedes comentar esta línea para buscar en más sitios si quieres
         except requests.exceptions.Timeout:
             st.warning(f"Timeout al conectar con API de ML en {pais_nombre}.")
         except requests.exceptions.RequestException as e:
             st.warning(f"Error de petición API para {pais_nombre} ({site_id}): {e}")
             if resp.status_code == 404:
-                st.info("Comprueba si la URL de la API es correcta o si el site_id es válido.")
+                st.info("La URL de la API o el `site_id` podrían ser incorrectos.")
             elif resp.status_code == 400:
-                st.info("Problema con la query. Intenta simplificarla.")
+                st.info("La query podría ser inválida. Intenta simplificarla.")
+            elif resp.status_code == 403:
+                st.error("¡Acceso Denegado! Mercado Libre está bloqueando la petición. Revisa tu `ML_APP_ID`.")
         except Exception as e:
             st.error(f"Error inesperado al buscar en {pais_nombre} (API): {e}")
-        time.sleep(1) # Pequeña pausa entre peticiones para evitar bloqueos
+        time.sleep(1.5) # Pausa entre peticiones para evitar bloqueos
 
     return todos_precios_usd, todos_resultados_crudos, sitio_usado
 
 
 def buscar_mercado_libre_scraping(query: str):
+    """
+    Realiza scraping de la web de Mercado Libre México para precios.
+    Devuelve precios ya convertidos a USD.
+    """
     slug = query.replace(" ", "-")
     url = f"https://listado.mercadolibre.com.mx/{slug}" 
     
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36", # User-Agent actualizado
         "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
         "Referer": "https://www.mercadolibre.com.mx/",
         "DNT": "1",
@@ -139,17 +195,17 @@ def buscar_mercado_libre_scraping(query: str):
         
         soup = BeautifulSoup(resp.text, "html.parser")
         
-        # --- NUEVOS SELECTORES PARA PROBAR (Ajusta ESTO según tu inspección) ---
-        # 1. Selector principal (común)
+        # --- SELECTORES MÁS ROBUSTOS / ALTERNATIVOS ---
+        # AQUI ES DONDE PUEDES NECESITAR AÑADIR/AJUSTAR SELECTORES BASADOS EN TU INSPECCIÓN
         price_selectors = [
-            "span.andes-money-amount__fraction", # Original y muy común
-            "div.ui-search-price__second-line span.andes-money-amount__fraction", # Otro común
-            "span.andes-money-amount__parts:first-child .andes-money-amount__fraction", # Visto en algunos layouts
-            "span[data-testid='price-part']", # A veces usan data-attributes
-            ".ui-search-item__group__element.ui-search-item__group__element--price span.andes-money-amount__fraction", # Más específico
-            "div.ui-search-item__group__element--price span.andes-money-amount__fraction", # Otra variante
-            "span.price-tag-fraction", # Un selector antiguo que a veces resurge
-            ".andes-money-amount__fraction" # Selector genérico si nada más funciona (puede capturar otros elementos)
+            "span.andes-money-amount__fraction", 
+            "div.ui-search-price__second-line span.andes-money-amount__fraction",
+            "span.andes-money-amount__parts:first-child .andes-money-amount__fraction",
+            "span[data-testid='price-part']",
+            ".ui-search-item__group__element--price span.andes-money-amount__fraction",
+            ".ui-search-price__group .andes-money-amount__fraction", # Visto en algunos paises
+            ".price-tag-fraction", # Selector antiguo
+            ".andes-money-amount__container .andes-money-amount__fraction", # Otro posible contenedor
         ]
         
         price_tags = []
@@ -158,21 +214,22 @@ def buscar_mercado_libre_scraping(query: str):
             if found_tags:
                 st.write(f"✔️ Selector `{selector}` encontró {len(found_tags)} elementos.")
                 price_tags.extend(found_tags)
-                # Para la demo, puedes parar aquí si ya encontraste algunos
-                # break 
+                # Opcional: break aquí si quieres capturar solo los primeros que funcionen
+                # break
             else:
                 st.write(f"❌ Selector `{selector}` no encontró elementos.")
         
         if not price_tags:
-            st.info("Scraping: Ninguno de los selectores directos encontró elementos de precio. Intentando fallback...")
-            # Fallback con expresiones regulares en todo el HTML si los selectores fallan
-            price_matches = re.findall(r'\$\s*(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)', resp.text)
-            st.write(f"Fallback encontró {len(price_matches)} coincidencias con regex.")
+            st.info("Scraping: Ninguno de los selectores directos encontró elementos de precio. Intentando fallback con Regex...")
+            # Fallback con expresiones regulares para buscar patrones de precios
+            # Este regex busca '$' seguido de dígitos, puntos y comas.
+            price_matches = re.findall(r'\$\s*(\d{1,3}(?:[\.,]\d{3})*(?:,\d{2})?)', resp.text)
+            st.write(f"Fallback Regex encontró {len(price_matches)} coincidencias.")
             for match in price_matches:
-                clean_price = match.replace('.', '').replace(',', '').strip() # Limpia formatos MXN/COP
+                clean_price = match.replace('.', '').replace(',', '').strip() 
                 try:
                     val_mxn = float(clean_price)
-                    if 50 < val_mxn < 5000000:
+                    if 50 < val_mxn < 5000000: # Rango amplio para MXN
                         precios_usd.append(convertir_a_usd(val_mxn, "MXN")) # Asume MXN para el scraping
                 except ValueError:
                     continue
@@ -189,7 +246,7 @@ def buscar_mercado_libre_scraping(query: str):
             txt = span.get_text(strip=True).replace(".", "").replace(",", "")
             try:
                 val_mxn = float(txt)
-                if 50 < val_mxn < 5000000:
+                if 50 < val_mxn < 5000000: # Rango amplio para MXN
                     precios_usd.append(convertir_a_usd(val_mxn, "MXN"))
             except ValueError:
                 continue
@@ -200,13 +257,104 @@ def buscar_mercado_libre_scraping(query: str):
     except requests.exceptions.RequestException as e:
         st.warning(f"⚠️ Scraping: Error de red o HTTP al intentar acceder a Mercado Libre: {e}. URL: {url}")
         if "403 Client Error: Forbidden" in str(e):
-            st.warning("Mercado Libre podría haber bloqueado la petición. Intenta cambiar el User-Agent o usar un proxy.")
+            st.warning("Mercado Libre podría haber bloqueado la petición. Intenta cambiar el User-Agent o usar un proxy/VPN.")
+        elif "404 Client Error" in str(e):
+            st.warning(f"La URL de scraping (`{url}`) no se encontró en Mercado Libre México. Revisa tu query.")
     except Exception as e:
         st.error(f"⚠️ Scraping: Error inesperado durante el proceso: {e}")
 
     return precios_usd
 
-# ... (El resto de las funciones: calcular_valor_empeno, generar_comentario_ia son las mismas) ...
+
+def calcular_valor_empeno(precios_usd: list, antiguedad: int, condicion: int):
+    """
+    Calcula el valor de empeño base ajustado por antigüedad y condición.
+    Todos los precios deben estar ya en USD.
+    """
+    if not precios_usd:
+        return None
+
+    precios_np = np.array(precios_usd)
+    mediana = float(np.median(precios_np))
+    promedio = float(np.mean(precios_np))
+    minimo = float(np.min(precios_np))
+    maximo = float(np.max(precios_np))
+
+    factor_antiguedad = max(0.30, 1 - 0.10 * antiguedad) 
+    factor_condicion = 0.4 + (0.6 * (condicion - 1) / 9)
+    factor_condicion = round(min(1.0, factor_condicion), 2) 
+    factor_riesgo_ganancia = 0.55 
+
+    valor_base = mediana * factor_antiguedad * factor_condicion * factor_riesgo_ganancia
+
+    return {
+        "mediana": mediana,
+        "promedio": promedio,
+        "minimo": minimo,
+        "maximo": maximo,
+        "valor_base": valor_base,
+        "factor_antiguedad": factor_antiguedad,
+        "factor_condicion": factor_condicion,
+        "factor_riesgo_ganancia": factor_riesgo_ganancia,
+    }
+
+
+def generar_comentario_ia(query: str, descripcion: str, precio_original: float, antiguedad: int, condicion: int, stats: dict):
+    """
+    Genera un comentario de IA con una recomendación de valor de empeño.
+    Requiere una API key de OpenAI.
+    """
+    if not client:
+        return "⚠️ IA no disponible: No se encontró la API key de OpenAI. Por favor, configúrala en el archivo '.env'."
+
+    prompt = f"""
+Eres un tasador experto de casas de empeño en Latinoamérica, conocido por tus recomendaciones realistas y equilibradas.
+
+Artículo a evaluar:
+- Búsqueda principal: "{query}"
+- Descripción del usuario: "{descripcion}"
+- Precio original (nuevo): {precio_original:.2f} USD
+- Antigüedad: {antiguedad} años
+- Condición (1-10): {condicion}/10
+
+Datos de mercado (ya en USD):
+- Mediana: {stats['mediana']:.2f} USD
+- Promedio: {stats['promedio']:.2f} USD
+- Rango de mercado: {stats['minimo']:.2f} - {stats['maximo']:.2f} USD
+
+Factores aplicados por el sistema:
+- Por antigüedad ({antiguedad} años): {stats['factor_antiguedad']:.2f}
+- Por condición ({condicion}/10): {stats['factor_condicion']:.2f}
+- Factor de riesgo y ganancia de empeño: {stats['factor_riesgo_ganancia']:.2f}
+
+Valor base estimado por el sistema (antes de tu IA): {stats['valor_base']:.2f} USD.
+
+Tu tarea:
+Basándote en toda la información, propón un valor de empeño final que sea realista y atractivo para el cliente,
+y justifica tu recomendación en **máximo 20 palabras**. Ajusta el valor base del sistema si lo consideras apropiado.
+Recuerda que los clientes buscan el mejor trato posible, pero la casa de empeño debe ser rentable.
+
+Formato EXACTO de respuesta (importante para el procesamiento):
+VALOR_RECOMENDADO_FINAL: <número en USD> - <tu justificación concisa>.
+"""
+
+    try:
+        with st.spinner("La IA está evaluando el artículo..."):
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Eres un tasador de empeño que equilibra la oferta justa con la rentabilidad.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.4,
+                max_tokens=100
+            )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Error consultando la IA: {e}. Asegúrate de que tu API Key sea válida y tengas créditos."
 
 # ================== INTERFAZ DE USUARIO (Streamlit) ==================
 
