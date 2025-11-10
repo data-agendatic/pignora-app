@@ -149,9 +149,7 @@ def buscar_mercado_libre_scraping(query: str):
         # --- SELECTORES MÁS ROBUSTOS / ALTERNATIVOS ---
         # 1. Selector principal (el que usabas)
         price_tags = soup.select("span.andes-money-amount__fraction")
-        st.write(resp.text[:1000])  # Muestra un fragmento del HTML para confirmar que cargó correctamente
-
-        
+                
         # 2. Selector alternativo para listados más recientes o diferentes layouts
         if not price_tags:
             price_tags = soup.select("div.ui-search-price__second-line span.andes-money-amount__fraction")
