@@ -51,7 +51,7 @@ def construir_query(categoria: str, modelo: str) -> str:
 
 
 # ================== FUNCIÓN PRINCIPAL: BÚSQUEDA EN eBAY ==================
-def def buscar_ebay_publico(query: str):
+def buscar_ebay_publico(query: str):
     """Scraping básico de eBay sin autenticación."""
     slug = query.replace(" ", "+")
     url = f"https://www.ebay.com/sch/i.html?_nkw={slug}&_sop=12"
