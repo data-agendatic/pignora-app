@@ -2,133 +2,125 @@ import os
 import requests
 import numpy as np
 import streamlit as st
-import matplotlib.pyplot as plt
 from dotenv import load_dotenv
-from openai import OpenAI
 from bs4 import BeautifulSoup
+from openai import OpenAI
 
-# ===== CONFIGURACIÓN INICIAL =====
+# ==== CONFIGURACIÓN ====
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-st.set_page_config(page_title="Pignora - Estimador", page_icon="💰")
-st.title("💰 Pignora - Estimador de Valor de Empeño")
+if OPENAI_API_KEY:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    client = None
+
+st.title("💰 Pignora - Estimador de Valor con IA y Web Scraping")
 
 st.markdown("""
-Esta herramienta estima el **valor de empeño** de artículos usados, combinando datos de mercado y ajustes opcionales con IA.
+Esta herramienta permite estimar el valor de empeño de un artículo mediante:
+1. Comparaciones de precios en línea (web scraping).  
+2. Ajuste opcional mediante IA.  
 """)
 
-# ===== FUNCIONES =====
-def consultar_mercado_libre(producto, site="MCO"):
-    """Consulta precios de Mercado Libre."""
-    url = f"https://api.mercadolibre.com/sites/{site}/search"
-    params = {"q": producto, "condition": "used", "limit": 25}
-    try:
-        resp = requests.get(url, params=params, timeout=5)
-        data = resp.json()
-        resultados = data.get("results", [])
-        precios = [r["price"] for r in resultados if "price" in r]
-        return precios if precios else None
-    except:
-        return None
+# ==== ENTRADAS DEL USUARIO ====
+producto = st.text_input("🔍 ¿Qué artículo quieres tasar? (ej: 'iPhone 11 128GB')")
+precio_original = st.number_input("💵 Precio original (USD)", min_value=10.0, value=500.0, step=10.0)
+antiguedad = st.slider("📆 Antigüedad (años)", 0, 15, 2)
+condicion = st.slider("⚙️ Condición (1 = mala, 10 = excelente)", 1, 10, 8)
+descripcion = st.text_area("📝 Descripción del artículo (opcional)", "iPhone 11 con caja, batería 85%, ligeros rayones.")
+usar_ia = st.checkbox("💡 Usar IA para comentario y ajuste (requiere suscripción)")
 
-def scraping_google(producto):
-    """Alternativa de scraping simple (público) si falla la API."""
+if st.button("Calcular valor estimado"):
+    if not producto:
+        st.warning("Debes escribir un nombre de producto.")
+        st.stop()
+
+    st.subheader("1️⃣ Búsqueda de precios en línea")
+
+    # ==== SCRAPING ====
     query = producto.replace(" ", "+")
-    url = f"https://www.google.com/search?q={query}+precio+usado"
+    url = f"https://www.google.com/search?q={query}+usado+precio"
     headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        precios = []
-        for t in soup.find_all("span"):
-            texto = t.get_text()
-            if "$" in texto:
-                try:
-                    valor = float(texto.replace("$", "").replace(",", "").split()[0])
-                    if 10 < valor < 10000:
-                        precios.append(valor)
-                except:
-                    continue
-        return precios if precios else None
-    except Exception as e:
-        st.warning(f"Error al hacer scraping: {e}")
-        return None
-
-def calcular_empeno(precios, antiguedad, condicion):
-    """Modelo de cálculo base."""
-    precios_np = np.array(precios)
-    mediana = float(np.median(precios_np))
-    factor_ant = max(0.2, 1 - 0.08 * antiguedad)
-    factor_cond = 0.3 + 0.07 * (condicion - 1)
-    valor_base = mediana * factor_ant * factor_cond * 0.6
-    return valor_base, mediana
-
-def ajuste_con_ia(producto, descripcion, valor_base, precios_ref):
-    """Ajuste opcional con IA (requiere suscripción del usuario)."""
-    if not OPENAI_API_KEY:
-        st.warning("Esta función requiere una suscripción activa con IA (clave OpenAI).")
-        return "Función de IA no disponible."
     
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    prompt = f"""
-Eres un tasador experto en artículos usados y casas de empeño en Latinoamérica.
+    precios = []
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        spans = soup.find_all("span")
+
+        for s in spans:
+            text = s.get_text()
+            if "$" in text:
+                num = "".join([c for c in text if c.isdigit() or c == "."])
+                try:
+                    val = float(num)
+                    if 5 < val < 10000:
+                        precios.append(val)
+                except:
+                    pass
+
+        if not precios:
+            st.warning("No se encontraron precios válidos en la web.")
+            st.stop()
+
+        promedio = np.mean(precios)
+        mediana = np.median(precios)
+        minimo = np.min(precios)
+        maximo = np.max(precios)
+
+        st.write(f"**Precios encontrados:** {len(precios)}")
+        st.write(f"- Promedio: ${promedio:,.2f}")
+        st.write(f"- Mediana: ${mediana:,.2f}")
+        st.write(f"- Rango: ${minimo:,.2f} - ${maximo:,.2f}")
+
+    except Exception as e:
+        st.error(f"Error en scraping: {e}")
+        st.stop()
+
+    # ==== CÁLCULO BASE ====
+    st.subheader("2️⃣ Cálculo base de empeño")
+
+    factor_antiguedad = max(0.2, 1 - 0.08 * antiguedad)
+    factor_condicion = 0.3 + 0.07 * (condicion - 1)
+    factor_riesgo = 0.6
+
+    valor_base = mediana * factor_antiguedad * factor_condicion * factor_riesgo
+    st.metric("Valor base estimado", f"${valor_base:,.2f}")
+
+    # ==== IA (OPCIONAL) ====
+    st.subheader("3️⃣ Ajuste con IA (opcional)")
+
+    if usar_ia and client:
+        prompt = f"""
+Eres un tasador experto de casas de empeño en Latinoamérica.
+
 Producto: {producto}
 Descripción: {descripcion}
-Valor base estimado: {valor_base:.2f} USD
-Precios de referencia: {min(precios_ref):.2f}-{max(precios_ref):.2f} USD
-Da una estimación ajustada (±15%) con una breve justificación de 15–25 palabras.
-Formato exacto:
-VALOR_FINAL: <número> USD - <comentario breve>.
+Precio original: {precio_original:.2f} USD
+Valor base calculado: {valor_base:.2f} USD
+Antigüedad: {antiguedad} años
+Condición: {condicion}/10
+
+Con base en esta información, propone un valor de empeño final y una breve justificación (máximo 25 palabras).
 """
-    try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
-        return r.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error de IA: {e}"
 
-# ===== INTERFAZ =====
-producto = st.text_input("🔹 Artículo a evaluar", "iPhone 11 128GB")
-precio_original = st.number_input("Precio original (USD)", value=500.0, step=10.0)
-antiguedad = st.slider("Antigüedad (años)", 0, 15, 2)
-condicion = st.slider("Condición (1=muy mala, 10=excelente)", 1, 10, 8)
-descripcion = st.text_area("Descripción del artículo", "iPhone 11 usado, batería 85%, con caja original.")
+        try:
+            with st.spinner("Consultando IA..."):
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "Eres un tasador preciso y realista."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.4,
+                )
+                comentario = response.choices[0].message.content.strip()
+                st.success(comentario)
+        except Exception as e:
+            st.warning(f"Error consultando la IA: {e}")
+    else:
+        st.info("La IA está desactivada. Solo se muestra el valor estimado basado en precios de mercado.")
 
-if st.button("Calcular valor base"):
-    precios = consultar_mercado_libre(producto)
-    if not precios:
-        st.warning("No se obtuvieron resultados desde Mercado Libre.")
-        precios = [precio_original * 0.8, precio_original * 0.9, precio_original]
-
-    valor_base, mediana = calcular_empeno(precios, antiguedad, condicion)
-
-    st.subheader("📊 Resultado inicial")
-    st.metric("Valor base estimado", f"${valor_base:,.2f}")
-    st.write(f"Mediana de mercado: ${mediana:,.2f}")
-
-    fig, ax = plt.subplots()
-    ax.hist(precios, bins=10, color="lightblue", edgecolor="gray")
-    ax.set_title("Distribución de precios de referencia")
-    st.pyplot(fig)
-
-    # ===== OPCIONES DE AJUSTE =====
-    st.markdown("---")
-    st.subheader("⚙️ Opciones de ajuste")
-
-    if st.button("🔍 Ajustar búsqueda (web scraping)"):
-        precios_scrap = scraping_google(producto)
-        if precios_scrap:
-            valor_adj, mediana_adj = calcular_empeno(precios_scrap, antiguedad, condicion)
-            st.success(f"Nuevo valor estimado: ${valor_adj:,.2f} (basado en scraping web)")
-            st.caption("El scraping amplió la muestra de precios para mejorar la estimación.")
-        else:
-            st.warning("No se encontraron precios mediante scraping.")
-
-    if st.button("🤖 Ajuste con IA (requiere suscripción)"):
-        resultado_ia = ajuste_con_ia(producto, descripcion, valor_base, precios)
-        st.info(resultado_ia)
-        st.caption("La IA analiza contexto y valores para ofrecer una justificación breve.")
+    st.caption("💡 Este cálculo es orientativo y combina datos de mercado con factores técnicos de depreciación.")
