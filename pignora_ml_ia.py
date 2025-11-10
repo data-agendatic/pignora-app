@@ -51,59 +51,32 @@ def construir_query(categoria: str, modelo: str) -> str:
 
 
 # ================== FUNCIÓN PRINCIPAL: BÚSQUEDA EN eBAY ==================
-def buscar_ebay_api(query: str):
-    """
-    Busca precios en eBay usando la API pública (Browse API).
-    Devuelve precios ya convertidos a USD.
-    """
-    url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
-    headers = {
-        "X-EBAY-C-ENDUSERCTX": "contextualLocation=country=US,zip=90210",
-        "Accept": "application/json",
-        "User-Agent": "Pignora-Demo/1.0",
-    }
+def def buscar_ebay_publico(query: str):
+    """Scraping básico de eBay sin autenticación."""
+    slug = query.replace(" ", "+")
+    url = f"https://www.ebay.com/sch/i.html?_nkw={slug}&_sop=12"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    precios = []
+    resultados = []
 
-    params = {
-        "q": query,
-        "limit": 20,
-        "filter": "priceCurrency:USD,conditionIds:{3000|4000|5000}",
-    }
-
-    precios_usd = []
-    resultados_crudos = []
-
-    st.subheader("🔍 Diagnóstico API eBay:")
-    st.write(f"Buscando con query: `{query}`")
+    st.subheader("🔍 Diagnóstico eBay (público)")
+    st.write(f"Buscando en: {url}")
 
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        st.write(f"Status API eBay: {resp.status_code}")
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
-
-        data = resp.json()
-        items = data.get("itemSummaries", [])
-
-        if not items:
-            st.info("No se encontraron resultados en eBay.")
-            return [], [], "eBay"
-
-        for item in items:
-            price_data = item.get("price", {})
-            if "value" in price_data:
-                precio = float(price_data["value"])
-                precios_usd.append(precio)
-                resultados_crudos.append({
-                    "Título": item.get("title", "")[:60] + "...",
-                    "Precio USD": f"{precio:,.2f}",
-                    "Link": item.get("itemWebUrl", ""),
-                    "Condición": item.get("condition", "Desconocido"),
-                })
-
-        return precios_usd, resultados_crudos, "eBay"
-
+        import re
+        matches = re.findall(r'\$\d+(?:\.\d{2})?', resp.text)
+        for m in matches:
+            val = float(m.replace("$", ""))
+            if 20 < val < 5000:
+                precios.append(val)
+        for p in precios[:10]:
+            resultados.append({"Título": query, "Precio USD": p, "Link": url})
+        return precios, resultados, "eBay Público"
     except Exception as e:
-        st.error(f"Error al consultar eBay API: {e}")
-        return [], [], "eBay"
+        st.error(f"Error en búsqueda pública de eBay: {e}")
+        return [], [], "eBay Público"
 
 
 # ================== CÁLCULOS ==================
@@ -198,7 +171,7 @@ if st.button("🚀 Calcular Estimación de Empeño", type="primary", use_contain
     query = construir_query(categoria, modelo)
     st.subheader(f"🔍 Evaluando: '{query}'")
 
-    precios_api_usd, resultados_crudos_api, site_usado = buscar_ebay_api(query)
+    precios_api_usd, resultados_crudos_api, site_usado = buscar_ebay_publico(query)
 
     precios_totales_usd = precios_api_usd
     if not precios_totales_usd:
