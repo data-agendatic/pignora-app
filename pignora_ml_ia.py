@@ -5,182 +5,143 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 from openai import OpenAI
+from PIL import Image
 
-# ===== CARGAR API KEY DE OPENAI =====
+# ===== CONFIGURACIÓN =====
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-if not OPENAI_API_KEY:
-    st.error("No se encontró la variable OPENAI_API_KEY en el archivo .env")
-else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+SITE_ID = "MCO"  # Colombia; cambiar a MLPA cuando funcione para Panamá
 
-# ===== CONFIGURACIÓN DE MERCADO LIBRE =====
-# OJO: para pruebas puedes usar MLM (México) o MLA (Argentina).
-# Cuando confirmes el site ID de Panamá, lo cambias aquí.
-SITE_ID = "MCO"  # cambiar a "MLPA" si el site existe y funciona para Panamá
+# ===== FUNCIONES =====
 
-st.title("💰 Pignora - Demo con Mercado Libre + IA")
-
-st.markdown(
-    """
-Esta demo hace tres cosas:
-
-1. Consulta precios reales en Mercado Libre.
-2. Calcula un valor base de empeño.
-3. Pide a una IA que ajuste el valor y lo explique.
-"""
-)
-
-# ===== ENTRADAS DEL USUARIO =====
-st.subheader("Datos del artículo")
-
-producto = st.text_input("¿Qué artículo quieres tasar? (ej: 'iPhone 11 128GB')")
-precio_original = st.number_input("Precio original aproximado (USD)", min_value=10.0, value=500.0, step=10.0)
-antiguedad = st.slider("Antigüedad (años)", 0, 15, 2)
-condicion = st.slider("Condición (1 = muy mala, 10 = excelente)", 1, 10, 8)
-descripcion = st.text_area(
-    "Descripción libre del artículo (opcional, se usa para la IA):",
-    "iPhone 11, buen estado, batería 85%, con caja, pequeños rayones en la carcasa."
-)
-
-if st.button("Calcular valor con mercado + IA"):
-
-    if not producto:
-        st.warning("Escribe al menos el nombre del artículo para buscar en Mercado Libre.")
-        st.stop()
-
-    # ===== 1. CONSULTA A MERCADO LIBRE =====
-    st.subheader("1️⃣ Precios en Mercado Libre")
-
+def buscar_precios_mercado(producto):
+    """Devuelve precios del producto en Mercado Libre o None si falla."""
     search_url = f"https://api.mercadolibre.com/sites/{SITE_ID}/search"
-    params = {
-        "q": producto,
-        "condition": "used",  # buscamos usados, más cercanos al empeño
-        "limit": 30
-    }
-
+    params = {"q": producto, "condition": "used", "limit": 30}
     try:
-        resp = requests.get(search_url, params=params)
+        resp = requests.get(search_url, params=params, timeout=8)
         data = resp.json()
-    except Exception as e:
-        st.error(f"Error consultando Mercado Libre: {e}")
-        st.stop()
+        precios = [item["price"] for item in data.get("results", []) if "price" in item]
+        if len(precios) < 3:
+            return None
+        return np.array(precios)
+    except Exception:
+        return None
 
-    resultados = data.get("results", [])
 
-    if not resultados:
-        st.warning("No se encontraron resultados en Mercado Libre para ese término.")
-        st.stop()
-
-    precios = [item["price"] for item in resultados if "price" in item]
-
-    if not precios:
-        st.warning("No se encontraron precios válidos en los resultados.")
-        st.stop()
-
-    precios_np = np.array(precios)
-    promedio = float(np.mean(precios_np))
-    mediana = float(np.median(precios_np))
-    minimo = float(np.min(precios_np))
-    maximo = float(np.max(precios_np))
-
-    st.write(f"Se encontraron **{len(precios)}** precios de referencia.")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Promedio mercado", f"${promedio:,.2f}")
-    col2.metric("Mediana mercado", f"${mediana:,.2f}")
-    col3.metric("Mínimo", f"${minimo:,.2f}")
-    col4.metric("Máximo", f"${maximo:,.2f}")
-
-    # Gráfico de distribución de precios
-    fig, ax = plt.subplots()
-    ax.hist(precios_np, bins=10)
-    ax.set_xlabel("Precio (USD)")
-    ax.set_ylabel("Cantidad de publicaciones")
-    ax.set_title("Distribución de precios en Mercado Libre")
-    st.pyplot(fig)
-
-    # ===== 2. CÁLCULO DEL VALOR BASE DE EMPEÑO =====
-    st.subheader("2️⃣ Cálculo de valor base de empeño (modelo simple)")
-
-    # Factor por antigüedad (decrece con los años, mínimo 0.2)
-    factor_antiguedad = max(0.2, 1 - 0.08 * antiguedad)
-    # Factor por condición (1–10 -> 0.3–1.0)
-    factor_condicion = 0.3 + 0.07 * (condicion - 1)
-    # Usamos la MEDIANA de mercado como referencia, más robusta que el promedio
-    valor_base = mediana * factor_antiguedad * factor_condicion
-    # Y un factor de “riesgo empeño” (no prestas el 100% del valor usado)
-    factor_riesgo = 0.6
-    valor_empeno = valor_base * factor_riesgo
-
-    st.write(f"**Factor antigüedad:** {factor_antiguedad:.2f}")
-    st.write(f"**Factor condición:** {factor_condicion:.2f}")
-    st.write(f"**Factor riesgo empeño:** {factor_riesgo:.2f}")
-
-    st.metric("Valor base sugerido de empeño", f"${valor_empeno:,.2f}")
-
-    # Gráfico: cómo cambiaría el valor de empeño según la condición
-    condiciones = np.arange(1, 11)
-    factores_cond = 0.3 + 0.07 * (condiciones - 1)
-    valores_por_cond = mediana * factor_antiguedad * factores_cond * factor_riesgo
-
-    fig2, ax2 = plt.subplots()
-    ax2.plot(condiciones, valores_por_cond, marker="o")
-    ax2.set_xlabel("Condición (1-10)")
-    ax2.set_ylabel("Valor de empeño estimado (USD)")
-    ax2.set_title("Sensibilidad del valor de empeño a la condición")
-    ax2.grid(True)
-    st.pyplot(fig2)
-
-    # ===== 3. AJUSTE Y EXPLICACIÓN CON IA =====
-    st.subheader("3️⃣ Ajuste y explicación con IA")
-
-    if not OPENAI_API_KEY:
-        st.warning("No se puede usar IA porque falta la API key de OpenAI en el archivo .env")
-        st.stop()
-
+def estimar_valor_ia(producto, descripcion, precio_original, antiguedad, condicion, valor_estimado, imagen=None):
+    """Solicita a la IA una valoración ajustada."""
     prompt = f"""
 Eres un tasador experto de casas de empeño en Latinoamérica.
 
 Datos del artículo:
 - Producto: {producto}
 - Descripción: {descripcion}
-- Precio original aproximado: {precio_original:.2f} USD
+- Precio original aproximado: {precio_original} USD
 - Antigüedad: {antiguedad} años
 - Condición (1-10): {condicion}
+- Valor estimado inicial: {valor_estimado} USD
 
-Datos de mercado (Mercado Libre):
-- Precio mediano de mercado usado: {mediana:.2f} USD
-- Precio promedio de mercado usado: {promedio:.2f} USD
-- Rango de precios observados: min {minimo:.2f} USD, max {maximo:.2f} USD.
-
-Cálculo interno del sistema:
-- Valor base de empeño calculado: {valor_empeno:.2f} USD
-
-Tarea:
-Con estos datos, propone un valor de empeño recomendado para este artículo en un contexto como Panamá, siendo conservador pero competitivo.
-
-Responde en español, en **una sola línea**, con este formato EXACTO:
-VALOR_RECOMENDADO: <numero_en_USD> - <explicación breve en 15-30 palabras>.
+Analiza el contexto y ajusta el valor a un rango realista para Panamá.
+Responde en una sola línea:
+VALOR_RECOMENDADO: <USD> - <explicación breve en 15-30 palabras>.
 """
 
-    with st.spinner("Consultando a la IA para ajustar el valor..."):
-        try:
+    if not client:
+        return "⚠️ No se detectó API key de OpenAI. No se puede usar IA."
+
+    try:
+        if imagen:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Eres un asistente experto en tasación de artículos para casas de empeño en Latinoamérica."},
+                    {"role": "system", "content": "Eres un experto en tasaciones y empeños."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": imagen}}
+                    ]}
+                ],
+            )
+        else:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Eres un experto en tasaciones y empeños."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
             )
-            texto_ia = response.choices[0].message.content.strip()
-        except Exception as e:
-            st.error(f"Error consultando la IA: {e}")
-            texto_ia = None
 
-    if texto_ia:
-        st.write("### Sugerencia de la IA")
-        st.info(texto_ia)
+        return response.choices[0].message.content.strip()
 
-    st.caption("Esta demo es solo orientativa. No sustituye un modelo de riesgo real ni criterios regulatorios.")
+    except Exception as e:
+        return f"⚠️ Error consultando la IA: {e}"
+
+
+# ===== INTERFAZ =====
+st.title("💰 Pignora - Tasación inteligente con IA y Mercado Libre")
+
+st.markdown("Selecciona si quieres incluir precios de Mercado Libre o subir una imagen del artículo.")
+usar_mercado = st.checkbox("🔍 Consultar precios en Mercado Libre")
+subir_foto = st.checkbox("📸 Subir imagen del artículo")
+
+producto = st.text_input("¿Qué artículo quieres tasar? (ej: 'iPhone 11 128GB')")
+precio_original = st.number_input("Precio original aproximado (USD)", min_value=10.0, value=500.0)
+antiguedad = st.slider("Antigüedad (años)", 0, 15, 2)
+condicion = st.slider("Condición (1 = muy mala, 10 = excelente)", 1, 10, 8)
+descripcion = st.text_area("Descripción breve:", "Buen estado, con caja, batería al 80%, algunos rayones leves.")
+imagen_archivo = st.file_uploader("Sube una foto (opcional, mejora la estimación visual):", type=["jpg", "png", "jpeg"]) if subir_foto else None
+
+if st.button("Calcular valor de empeño"):
+    precios_np = None
+
+    # ===== 1. MERCADO LIBRE =====
+    if usar_mercado and producto:
+        st.subheader("🔹 Consulta de precios en Mercado Libre")
+        precios_np = buscar_precios_mercado(producto)
+        if precios_np is not None:
+            promedio = float(np.mean(precios_np))
+            mediana = float(np.median(precios_np))
+            minimo = float(np.min(precios_np))
+            maximo = float(np.max(precios_np))
+
+            st.write(f"**Precios obtenidos:** {len(precios_np)} resultados.")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Promedio", f"${promedio:,.2f}")
+            col2.metric("Mediana", f"${mediana:,.2f}")
+            col3.metric("Mínimo", f"${minimo:,.2f}")
+            col4.metric("Máximo", f"${maximo:,.2f}")
+
+            fig, ax = plt.subplots()
+            ax.hist(precios_np, bins=10)
+            ax.set_xlabel("Precio (USD)")
+            ax.set_ylabel("Publicaciones")
+            ax.set_title("Distribución de precios en Mercado Libre")
+            st.pyplot(fig)
+        else:
+            st.info("No se pudieron obtener precios de Mercado Libre o no hubo resultados.")
+
+    # ===== 2. CÁLCULO BASE =====
+    st.subheader("📊 Cálculo base de empeño")
+
+    factor_antiguedad = max(0.2, 1 - 0.08 * antiguedad)
+    factor_condicion = 0.3 + 0.07 * (condicion - 1)
+    base = (np.median(precios_np) if precios_np is not None else precio_original * 0.4)
+    valor_estimado = base * factor_antiguedad * factor_condicion * 0.6
+
+    st.metric("Valor base estimado", f"${valor_estimado:,.2f}")
+
+    # ===== 3. IA =====
+    st.subheader("🤖 Ajuste con IA")
+    imagen_url = None
+    if imagen_archivo:
+        img = Image.open(imagen_archivo)
+        st.image(img, caption="Imagen subida", use_container_width=True)
+        imagen_url = st.file_uploader  # Placeholder para futuras mejoras (upload a servidor)
+
+    texto_ia = estimar_valor_ia(producto, descripcion, precio_original, antiguedad, condicion, valor_estimado, imagen_url)
+    st.info(texto_ia)
+
+st.caption("💡 Esta demo combina IA + comparaciones de mercado para estimar valores de empeño de forma referencial.")
