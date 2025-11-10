@@ -10,117 +10,144 @@ from openai import OpenAI
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# Inicializar cliente de OpenAI solo si hay API Key
+client = None
 if OPENAI_API_KEY:
     client = OpenAI(api_key=OPENAI_API_KEY)
-else:
-    client = None
 
-st.title("💰 Pignora - Estimador de Valor con IA y Web Scraping")
+# ==== INTERFAZ ====
+st.title("💰 Pignora - Estimador de Valor con Mercado + IA")
 
 st.markdown("""
-Esta herramienta permite estimar el valor de empeño de un artículo mediante:
-1. Comparaciones de precios en línea (web scraping).  
-2. Ajuste opcional mediante IA.  
+Esta herramienta estima el valor de empeño de un artículo combinando:
+1️⃣ Comparación de precios reales en línea.  
+2️⃣ Ajuste opcional con Inteligencia Artificial (requiere suscripción).  
 """)
 
-# ==== ENTRADAS DEL USUARIO ====
+# ==== ENTRADAS ====
 producto = st.text_input("🔍 ¿Qué artículo quieres tasar? (ej: 'iPhone 11 128GB')")
 precio_original = st.number_input("💵 Precio original (USD)", min_value=10.0, value=500.0, step=10.0)
 antiguedad = st.slider("📆 Antigüedad (años)", 0, 15, 2)
 condicion = st.slider("⚙️ Condición (1 = mala, 10 = excelente)", 1, 10, 8)
-descripcion = st.text_area("📝 Descripción del artículo (opcional)", "iPhone 11 con caja, batería 85%, ligeros rayones.")
-usar_ia = st.checkbox("💡 Usar IA para comentario y ajuste (requiere suscripción)")
+descripcion = st.text_area("📝 Descripción del artículo", "iPhone 11, buen estado, con caja, ligeros rayones.")
+fuente_datos = st.selectbox("🌐 Fuente de datos:", ["Mercado Libre", "Web scraping (Google)", "Automático (ambos)"])
+usar_ia = st.checkbox("💡 Usar IA premium para comentario y ajuste (requiere suscripción)")
 
+# ==== BOTÓN ====
 if st.button("Calcular valor estimado"):
     if not producto:
         st.warning("Debes escribir un nombre de producto.")
         st.stop()
 
-    st.subheader("1️⃣ Búsqueda de precios en línea")
-
-    # ==== SCRAPING ====
-    query = producto.replace(" ", "+")
-    url = f"https://www.google.com/search?q={query}+usado+precio"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
     precios = []
 
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
-        spans = soup.find_all("span")
+    # ==== 1️⃣ MERCADO LIBRE ====
+    def buscar_mercado_libre(query):
+        SITE_ID = "MLM"  # México por defecto (puedes cambiar por MLPA si existe para Panamá)
+        search_url = f"https://api.mercadolibre.com/sites/{SITE_ID}/search"
+        params = {"q": query, "condition": "used", "limit": 30}
+        try:
+            resp = requests.get(search_url, params=params, timeout=10)
+            data = resp.json()
+            resultados = data.get("results", [])
+            return [r["price"] for r in resultados if "price" in r]
+        except Exception:
+            return []
 
-        for s in spans:
-            text = s.get_text()
-            if "$" in text:
-                num = "".join([c for c in text if c.isdigit() or c == "."])
-                try:
-                    val = float(num)
-                    if 5 < val < 10000:
-                        precios.append(val)
-                except:
-                    pass
+    # ==== 2️⃣ WEB SCRAPING (GOOGLE) ====
+    def buscar_scraping(query):
+        precios_scrap = []
+        url = f"https://www.google.com/search?q={query.replace(' ', '+')}+precio+usado"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(response.text, "html.parser")
+            spans = soup.find_all("span")
+            for s in spans:
+                text = s.get_text()
+                if "$" in text:
+                    num = "".join([c for c in text if c.isdigit() or c == "."])
+                    try:
+                        val = float(num)
+                        if 5 < val < 20000:
+                            precios_scrap.append(val)
+                    except:
+                        pass
+        except Exception:
+            pass
+        return precios_scrap
 
+    # ==== LÓGICA DE FUENTE ====
+    if fuente_datos == "Mercado Libre":
+        precios = buscar_mercado_libre(producto)
+    elif fuente_datos == "Web scraping (Google)":
+        precios = buscar_scraping(producto)
+    else:
+        precios = buscar_mercado_libre(producto)
         if not precios:
-            st.warning("No se encontraron precios válidos en la web.")
-            st.stop()
+            precios = buscar_scraping(producto)
 
-        promedio = np.mean(precios)
-        mediana = np.median(precios)
-        minimo = np.min(precios)
-        maximo = np.max(precios)
-
-        st.write(f"**Precios encontrados:** {len(precios)}")
-        st.write(f"- Promedio: ${promedio:,.2f}")
-        st.write(f"- Mediana: ${mediana:,.2f}")
-        st.write(f"- Rango: ${minimo:,.2f} - ${maximo:,.2f}")
-
-    except Exception as e:
-        st.error(f"Error en scraping: {e}")
+    if not precios:
+        st.error("❌ No se encontraron precios válidos en línea.")
         st.stop()
 
-    # ==== CÁLCULO BASE ====
-    st.subheader("2️⃣ Cálculo base de empeño")
+    # ==== CÁLCULOS ====
+    precios_np = np.array(precios)
+    promedio = np.mean(precios_np)
+    mediana = np.median(precios_np)
+    minimo = np.min(precios_np)
+    maximo = np.max(precios_np)
+
+    st.success(f"Se encontraron {len(precios)} precios en {fuente_datos}.")
+    st.write(f"- Promedio: ${promedio:,.2f}")
+    st.write(f"- Mediana: ${mediana:,.2f}")
+    st.write(f"- Rango: ${minimo:,.2f} - ${maximo:,.2f}")
+
+    # ==== 3️⃣ VALOR BASE ====
+    st.subheader("💎 Cálculo base de empeño")
 
     factor_antiguedad = max(0.2, 1 - 0.08 * antiguedad)
     factor_condicion = 0.3 + 0.07 * (condicion - 1)
     factor_riesgo = 0.6
-
     valor_base = mediana * factor_antiguedad * factor_condicion * factor_riesgo
+
     st.metric("Valor base estimado", f"${valor_base:,.2f}")
 
-    # ==== IA (OPCIONAL) ====
-    st.subheader("3️⃣ Ajuste con IA (opcional)")
+    # ==== 4️⃣ IA PREMIUM ====
+    if usar_ia:
+        if not OPENAI_API_KEY:
+            st.error("No se detectó clave de API. No se puede usar IA premium.")
+        else:
+            st.subheader("🧠 Ajuste y comentario con IA")
+            prompt = f"""
+Eres un tasador experto en artículos de segunda mano en Latinoamérica.
+Evalúa el siguiente artículo y su valor de empeño en Panamá.
 
-    if usar_ia and client:
-        prompt = f"""
-Eres un tasador experto de casas de empeño en Latinoamérica.
+Datos:
+- Producto: {producto}
+- Descripción: {descripcion}
+- Precio original: {precio_original} USD
+- Antigüedad: {antiguedad} años
+- Condición: {condicion}/10
+- Precio mediano de mercado: {mediana:.2f} USD
+- Valor base calculado: {valor_base:.2f} USD
 
-Producto: {producto}
-Descripción: {descripcion}
-Precio original: {precio_original:.2f} USD
-Valor base calculado: {valor_base:.2f} USD
-Antigüedad: {antiguedad} años
-Condición: {condicion}/10
-
-Con base en esta información, propone un valor de empeño final y una breve justificación (máximo 25 palabras).
+Responde en español con este formato exacto:
+VALOR_RECOMENDADO: <monto en USD> - <comentario breve sobre el estado, mercado y razonabilidad del valor>.
 """
-
-        try:
-            with st.spinner("Consultando IA..."):
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Eres un tasador preciso y realista."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.4,
-                )
-                comentario = response.choices[0].message.content.strip()
-                st.success(comentario)
-        except Exception as e:
-            st.warning(f"Error consultando la IA: {e}")
+            try:
+                with st.spinner("Consultando a la IA..."):
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "Eres un asistente experto en tasación de artículos de empeño."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.4,
+                    )
+                    texto_ia = response.choices[0].message.content.strip()
+                    st.info(texto_ia)
+            except Exception as e:
+                st.error(f"Error consultando la IA: {e}")
     else:
-        st.info("La IA está desactivada. Solo se muestra el valor estimado basado en precios de mercado.")
-
-    st.caption("💡 Este cálculo es orientativo y combina datos de mercado con factores técnicos de depreciación.")
+        st.caption("💡 Puedes activar el ajuste con IA para obtener un comentario de valoración detallado.")
