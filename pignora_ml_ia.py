@@ -1,3 +1,41 @@
+# ================== IMPORTS Y CONFIGURACIÓN INICIAL ==================
+import os
+import re
+import time
+import requests
+import numpy as np
+import pandas as pd
+import feedparser
+from bs4 import BeautifulSoup
+import streamlit as st
+from dotenv import load_dotenv
+from openai import OpenAI
+import altair as alt
+
+# ================== CONFIGURACIÓN DEL ENTORNO ==================
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+st.set_page_config(page_title="Pignora - Estimador de Empeño", page_icon="💰", layout="wide")
+st.title("💰 Pignora - Estimador de Valor de Empeño")
+
+st.markdown("""
+¡Bienvenido a Pignora! Esta herramienta te ayuda a estimar un valor de empeño combinando:
+
+1.  **🏷️ Precios de Mercado:** Busca precios de artículos similares en eBay, Google Shopping y Encuentra24.
+2.  **📉 Modelo de Depreciación:** Aplica ajustes por antigüedad y condición del artículo.
+3.  **🤖 Ajuste con IA:** Ofrece una evaluación premium con justificación automática.
+""")
+
+# ================== FUNCIONES DE UTILIDAD ==================
+TASAS_CAMBIO_A_USD = {"USD": 1.0, "EUR": 1.07, "GBP": 1.22}
+
+def convertir_a_usd(precio: float, moneda_origen: str) -> float:
+    tasa = TASAS_CAMBIO_A_USD.get(moneda_origen.upper(), 1)
+    return precio * tasa
+
+
 def construir_query(categoria: str, modelo: str) -> str:
     """
     Crea una query más inteligente combinando categoría y modelo.
