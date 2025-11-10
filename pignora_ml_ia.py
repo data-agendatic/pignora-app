@@ -1,177 +1,192 @@
-import os, re, requests, numpy as np, pandas as pd, feedparser, streamlit as st, altair as alt
+import os
+import re
+import time
+import requests
+import numpy as np
+import pandas as pd
+import feedparser
 from bs4 import BeautifulSoup
+import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
+import altair as alt
 
 # ================== CONFIGURACIÓN INICIAL ==================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-st.set_page_config(page_title="Pignora - Estimador Multiactivo", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Pignora - Estimador de Empeño", page_icon="💰", layout="wide")
 st.title("💰 Pignora - Estimador Multiactivo")
 
 st.markdown("""
 ¡Bienvenido a **Pignora**!  
-Evalúa diferentes tipos de activos y servicios financieros:
+Selecciona el tipo de activo o servicio para calcular su valor o simular una operación financiera:
 
-- **💻 Electrónica:** precios de mercado en tiempo real.  
-- **🟡 Oro:** cálculo por peso y pureza.  
-- **🌐 Activos Digitales:** estima valor de webs o redes.  
-- **🔒 Escrow:** simula custodia temporal con tarifa.  
-- **💵 PayPal:** vende tu saldo y recibe ACH local.  
----
+- **💻 Electrónica:** busca precios en eBay, Google Shopping y Encuentra24.  
+- **🟡 Prendas de Oro:** calcula por peso y pureza.  
+- **🌐 Activos Digitales:** estima valor de dominios o webs.  
+- **💳 Custodia / Vende tu saldo PayPal:** simula operaciones Fintech seguras.  
 """)
 
-# ================== FUNCIONES AUXILIARES ==================
+# ================== FUNCIONES DE UTILIDAD ==================
+TASAS_CAMBIO_A_USD = {"USD": 1.0, "EUR": 1.07, "GBP": 1.22}
+
+def convertir_a_usd(precio: float, moneda_origen: str) -> float:
+    return precio * TASAS_CAMBIO_A_USD.get(moneda_origen.upper(), 1)
+
+def construir_query(categoria: str, modelo: str) -> str:
+    modelo, categoria = (modelo or "").strip(), (categoria or "").strip()
+    if not modelo and not categoria: return ""
+    if not modelo: return categoria
+    if not categoria or categoria.lower() in modelo.lower(): return modelo
+    return f"{modelo} {categoria}".strip()
+
+# ================== ESTIMADOR DE ORO ==================
 def estimar_oro(peso_gramos: float, pureza: int):
-    precio_oro_puro = 75.0  # USD/gramo
-    valor_bruto = peso_gramos * precio_oro_puro * (pureza / 24)
+    precio_oro_puro = 75.0
+    factor_pureza = pureza / 24
+    valor_bruto = peso_gramos * precio_oro_puro * factor_pureza
     valor_empeno = valor_bruto * 0.85
     return round(valor_bruto, 2), round(valor_empeno, 2)
 
+# ================== ESTIMADOR DE ACTIVOS DIGITALES ==================
 def estimar_activo_digital(url: str):
     headers = {"User-Agent": "Mozilla/5.0"}
     site = url.replace("https://", "").replace("http://", "").split("/")[0]
     check_url = f"https://www.siteprice.org/website-worth/{site}"
-    st.markdown(f"🔗 **Fuente:** [siteprice.org]({check_url})")
+    st.markdown(f"🔹 **Valorando dominio:** [{check_url}]({check_url})")
+
     try:
         resp = requests.get(check_url, headers=headers, timeout=10)
         resp.raise_for_status()
         match = re.search(r"\$[0-9,]+", resp.text)
         if match:
             val = float(match.group(0).replace("$", "").replace(",", ""))
-            return val, val * 0.5
+            valor_empeno = val * 0.5
+            return val, valor_empeno
         else:
-            st.info("ℹ️ No se detectó valoración para ese dominio.")
+            st.info("ℹ️ No se detectó valoración disponible para ese dominio.")
             return None, None
     except Exception as e:
         st.warning(f"⚠️ Error estimando activo digital: {e}")
         return None, None
 
-def buscar_ebay(query):
-    url = f"https://www.ebay.com/sch/i.html?_nkw={query.replace(' ', '+')}"
-    try:
-        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}).text
-        precios = [float(p.replace('$', '')) for p in re.findall(r'\$\d+(?:\.\d{2})?', html) if 20 < float(p.replace('$', '')) < 10000]
-        return precios
-    except:
-        return []
+# ================== FUNCIONES FINTECH ==================
+def simular_escrow(monto: float, dias: int, comision_pct: float = 3.5):
+    comision = monto * comision_pct / 100
+    neto = monto - comision
+    return {
+        "monto_inicial": round(monto, 2),
+        "comision": round(comision, 2),
+        "monto_liberado": round(neto, 2),
+        "dias": dias
+    }
 
+def simular_paypal_to_ach(monto: float, comision_pct: float = 8.0):
+    comision = monto * comision_pct / 100
+    neto = monto - comision
+    return {
+        "deposito_paypal": round(monto, 2),
+        "comision": round(comision, 2),
+        "transferencia_ach": round(neto, 2),
+        "tiempo": "24 horas"
+    }
+
+# ================== SCRAPING / ELECTRÓNICA ==================
+def buscar_ebay_publico(query: str):
+    slug = query.replace(" ", "+")
+    url = f"https://www.ebay.com/sch/i.html?_nkw={slug}&_sop=12"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    precios, resultados = [], []
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200: return [], []
+        matches = re.findall(r'\$\s?\d+(?:\.\d{2})?', resp.text)
+        for m in matches:
+            val = float(m.replace("$", "").replace(",", ""))
+            if 20 < val < 10000: precios.append(val)
+        for p in precios[:10]:
+            resultados.append({"Fuente": "eBay", "Título": query, "Precio USD": p, "Link": url})
+        return precios, resultados
+    except Exception:
+        return [], []
+
+# ================== CÁLCULO BASE ==================
 def calcular_valor_empeno(precios_usd, antiguedad, condicion):
     if not precios_usd: return None
     arr = np.array(precios_usd)
-    mediana, promedio = np.median(arr), np.mean(arr)
-    f_ant = max(0.3, 1 - 0.1 * antiguedad)
+    mediana, promedio, minimo, maximo = np.median(arr), np.mean(arr), np.min(arr), np.max(arr)
+    f_ant = max(0.30, 1 - 0.10 * antiguedad)
     f_cond = round(min(1.0, 0.4 + 0.6 * (condicion - 1) / 9), 2)
-    valor = mediana * f_ant * f_cond * 0.55
-    return dict(mediana=mediana, promedio=promedio, valor=valor)
-
-# ================== ESTILO DE BOTONES ==================
-st.markdown("""
-<style>
-div.stButton > button:first-child {
-    background-color: #e63946;
-    color: white;
-    font-weight: bold;
-    border: none;
-    border-radius: 8px;
-    height: 3em;
-    width: 100%;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-    transition: all 0.3s ease;
-}
-div.stButton > button:first-child:hover {
-    background-color: #ff4b5c;
-    transform: scale(1.02);
-}
-.metric-small {font-size: 0.9em; color: gray;}
-</style>
-""", unsafe_allow_html=True)
+    f_riesgo = 0.55
+    valor = mediana * f_ant * f_cond * f_riesgo
+    return dict(mediana=mediana, promedio=promedio, minimo=minimo, maximo=maximo,
+                valor_base=valor, factor_antiguedad=f_ant, factor_condicion=f_cond, factor_riesgo=f_riesgo)
 
 # ================== INTERFAZ PRINCIPAL ==================
-col1, col2 = st.columns(2)
+tipo_activo = st.radio("Selecciona una opción:",
+                       ["💻 Electrónica", "🟡 Prendas de Oro", "🌐 Activos Digitales", "💳 Custodia / Vende tu saldo PayPal"],
+                       horizontal=True)
 
-# ---------- PANEL ELECTRÓNICA ----------
-with col1:
-    st.subheader("💻 Electrónica")
-    categoria = st.selectbox("Tipo", ["Laptop","iPhone","Consola","Televisor","Otro"], key="cat")
-    modelo = st.text_input("Modelo / Referencia", "PlayStation 4", key="mod")
-    antiguedad = st.slider("Antigüedad (años)", 0, 10, 3, key="ant")
-    condicion = st.slider("Condición (1-10)", 1, 10, 7, key="cond")
+# --- SIDEBARS ---
+if tipo_activo == "💻 Electrónica":
+    with st.sidebar:
+        categoria = st.selectbox("Tipo de artículo", ["Laptop", "iPhone", "Smartphone Android", "Consola de videojuegos", "Televisor", "Otro"])
+        modelo = st.text_input("Modelo / Referencia", "PlayStation 4")
+        antiguedad = st.slider("Antigüedad (años)", 0, 10, 4)
+        condicion = st.slider("Condición (1 = mala, 10 = excelente)", 1, 10, 7)
+elif tipo_activo == "🟡 Prendas de Oro":
+    with st.sidebar:
+        peso_gramos = st.number_input("Peso (gramos)", 0.1, 500.0, 10.0, 0.1)
+        pureza = st.selectbox("Pureza (quilates)", [10, 14, 18, 22, 24], index=2)
+elif tipo_activo == "🌐 Activos Digitales":
+    with st.sidebar:
+        url = st.text_input("URL del dominio / red social", "https://tusitio.com")
+elif tipo_activo == "💳 Custodia / Vende tu saldo PayPal":
+    with st.sidebar:
+        st.header("⚙️ Simulador Fintech")
+        monto = st.number_input("Monto (USD)", min_value=10.0, value=100.0, step=10.0)
+        dias = st.slider("Días de retención (Escrow)", 1, 30, 7)
 
-    if st.button("🚀 Estimar Electrónica"):
-        precios = buscar_ebay(f"{categoria} {modelo}")
-        if precios:
-            datos = calcular_valor_empeno(precios, antiguedad, condicion)
-            st.metric("💰 Mediana", f"${datos['mediana']:.2f}")
-            st.metric("💵 Valor estimado de empeño", f"${datos['valor']:.2f}")
-            st.caption("Fuente: eBay (referencias recientes).")
-        else:
-            st.error("No se hallaron precios para esa búsqueda.")
+# ================== BOTÓN PRINCIPAL ==================
+if st.button("🚀 Ejecutar Operación / Calcular", use_container_width=True):
 
-# ---------- PANEL ORO ----------
-with col1:
-    st.subheader("🟡 Prendas de Oro")
-    peso = st.number_input("Peso (g)", 0.1, 500.0, 10.0, 0.1, key="peso")
-    pureza = st.selectbox("Pureza (K)", [10, 14, 18, 22, 24], index=2, key="pureza")
-
-    if st.button("🔍 Calcular Oro"):
-        bruto, empeño = estimar_oro(peso, pureza)
+    # --- ORO ---
+    if tipo_activo == "🟡 Prendas de Oro":
+        bruto, empeno = estimar_oro(peso_gramos, pureza)
+        st.subheader("🟡 Estimación de Prenda de Oro")
         st.metric("💰 Valor comercial", f"${bruto:,.2f}")
-        st.metric("💵 Valor empeño sugerido", f"${empeño:,.2f}")
-        st.caption("Basado en $75/g de oro 24K y 85% valor empeño.")
+        st.metric("💵 Valor de empeño sugerido", f"${empeno:,.2f}")
 
-# ---------- PANEL DIGITAL ----------
-with col2:
-    st.subheader("🌐 Activos Digitales")
-    url = st.text_input("Dominio / Red Social / Web", "https://tusitio.com", key="url")
-
-    if st.button("🌎 Estimar Activo Digital"):
-        bruto, empeño = estimar_activo_digital(url)
+    # --- DIGITAL ---
+    elif tipo_activo == "🌐 Activos Digitales":
+        bruto, empeno = estimar_activo_digital(url)
         if bruto:
-            st.metric("💻 Valor estimado del dominio", f"${bruto:,.2f}")
-            st.metric("💵 Valor empeño sugerido", f"${empeño:,.2f}")
-            st.caption("Estimación web basada en tráfico y SEO público.")
-        else:
-            st.error("No se pudo estimar ese dominio.")
+            st.metric("💻 Valor estimado del sitio", f"${bruto:,.2f}")
+            st.metric("💵 Valor de empeño sugerido", f"${empeno:,.2f}")
 
-# ---------- PANEL ESCROW ----------
-with col2:
-    st.subheader("🔒 Escrow - Custodia Temporal")
-    monto = st.number_input("Monto a custodiar (USD)", 10.0, 10000.0, 500.0, 10.0, key="escrow")
-    dias = st.slider("Duración del acuerdo (días)", 1, 90, 15, key="dias")
+    # --- CUSTODIA / PAYPAL ---
+    elif tipo_activo == "💳 Custodia / Vende tu saldo PayPal":
+        st.subheader("💼 Simulador de Custodia (Escrow)")
+        escrow = simular_escrow(monto, dias)
+        st.success(f"""
+        💰 Monto en custodia: ${escrow['monto_inicial']:.2f}  
+        💸 Comisión (3.5%): ${escrow['comision']:.2f}  
+        🏦 Monto liberado: ${escrow['monto_liberado']:.2f}  
+        ⏳ Retención: {escrow['dias']} días
+        """)
+        df1 = pd.DataFrame({"Concepto": ["Comisión", "Monto liberado"], "Valor": [escrow["comision"], escrow["monto_liberado"]]})
+        st.altair_chart(alt.Chart(df1).mark_arc(innerRadius=50).encode(theta="Valor", color="Concepto"), use_container_width=True)
 
-    if st.button("🧾 Simular Escrow"):
-        tarifa = 0.015 * monto
-        st.metric("💵 Comisión de custodia", f"${tarifa:,.2f}")
-        st.metric("📅 Duración", f"{dias} días")
-        st.caption("Pignora actúa como tercero neutral. Comisión: 1.5%.")
-        pie = pd.DataFrame({
-            'Concepto': ['Monto Liberado', 'Comisión Escrow'],
-            'Valor': [monto - tarifa, tarifa]
-        })
-        chart = alt.Chart(pie).mark_arc().encode(
-            theta='Valor', color='Concepto', tooltip=['Concepto','Valor']
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-# ---------- PANEL PAYPAL ----------
-st.markdown("---")
-st.subheader("💵 Vende tu Saldo PayPal")
-monto_pp = st.number_input("Monto en PayPal (USD)", 10.0, 2000.0, 100.0, 10.0, key="pp")
-
-if st.button("💸 Simular Venta PayPal"):
-    comision = monto_pp * 0.07
-    recibido = monto_pp - comision
-    st.metric("💵 Recibirás vía ACH", f"${recibido:,.2f}")
-    st.metric("📉 Comisión aplicada", f"${comision:,.2f}")
-    st.caption("Depósito local en 24h. Comisión del 7%.")
-    pie2 = pd.DataFrame({
-        'Concepto': ['Monto a recibir', 'Comisión Pignora'],
-        'Valor': [recibido, comision]
-    })
-    chart2 = alt.Chart(pie2).mark_arc().encode(
-        theta='Valor', color='Concepto', tooltip=['Concepto','Valor']
-    )
-    st.altair_chart(chart2, use_container_width=True)
+        st.markdown("---")
+        st.subheader("💳 Simular venta de saldo PayPal → ACH")
+        paypal = simular_paypal_to_ach(monto)
+        st.success(f"""
+        📥 Depósito PayPal: ${paypal['deposito_paypal']:.2f}  
+        💸 Comisión (8%): ${paypal['comision']:.2f}  
+        🏦 Transferencia ACH neta: ${paypal['transferencia_ach']:.2f}  
+        ⏱️ Tiempo estimado: {paypal['tiempo']}
+        """)
+        df2 = pd.DataFrame({"Concepto": ["Comisión", "Transferencia neta"], "Valor": [paypal["comision"], paypal["transferencia_ach"]]})
+        st.altair_chart(alt.Chart(df2).mark_arc(innerRadius=50).encode(theta="Valor", color="Concepto"), use_container_width=True)
